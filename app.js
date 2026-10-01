@@ -1,7 +1,13 @@
 const express = require('express');
-const cors = require('cors'); // Autorise les requêtes cross-origin
+const cors = require('cors');
 require('dotenv').config();
 const path = require('path');
+
+const corsOptions = {
+  origin: '*', 
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
 
 const authRoutes = require('./routes/authRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');    

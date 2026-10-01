@@ -1,37 +1,22 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const pool = require('../config/db');
 const verifyToken = require('../middleware/auth');
 
 const router = express.Router();
 
-// Configuration de multer pour l'upload des photos de profil
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'profiles');
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.jpg';
-    cb(null, `user_${req.user.userId}_${Date.now()}${ext}`);
-  },
-});
-
+// Multer stocke le fichier en mémoire (aucune écriture disque)
 const upload = multer({
-  storage,
-  limits: { fileSize: 2 * 1024 * 1024 },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 Mo max
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
     else cb(new Error('Seules les images sont autorisées'));
   },
 });
 
-// --- GET /api/user/me : récupérer le profil ---
+// --- GET /api/user/me ---
 router.get('/me', verifyToken, async (req, res) => {
   try {
     const connection = await pool.getConnection();
@@ -52,7 +37,7 @@ router.get('/me', verifyToken, async (req, res) => {
   }
 });
 
-// --- PUT /api/user/me : modifier les informations ---
+// --- PUT /api/user/me ---
 router.put('/me', verifyToken, async (req, res) => {
   const { name, surname, email, phone } = req.body;
 
@@ -63,7 +48,6 @@ router.put('/me', verifyToken, async (req, res) => {
   try {
     const connection = await pool.getConnection();
 
-    // Vérifier si l'email est déjà utilisé par un autre utilisateur
     const [existing] = await connection.query(
       'SELECT id FROM user WHERE email = ? AND id != ?',
       [email, req.user.userId]
@@ -91,7 +75,7 @@ router.put('/me', verifyToken, async (req, res) => {
   }
 });
 
-// --- PUT /api/user/password : changer le mot de passe ---
+// --- PUT /api/user/password ---
 router.put('/password', verifyToken, async (req, res) => {
   const { oldPassword, newPassword } = req.body;
 
@@ -134,8 +118,11 @@ router.put('/password', verifyToken, async (req, res) => {
   }
 });
 
-// --- POST /api/user/profile-picture : uploader une photo ---
-router.post('/profile-picture', verifyToken, (req, res, next) => {
+// --- POST /api/user/profile-picture : uploader une photo (stockée en base64) ---
+router.post(
+  '/profile-picture',
+  verifyToken,
+  (req, res, next) => {
     upload.single('picture')(req, res, (err) => {
       if (err) {
         console.error('❌ Erreur multer :', err);
@@ -143,30 +130,29 @@ router.post('/profile-picture', verifyToken, (req, res, next) => {
       }
       next();
     });
-  }, async (req, res) => {
-    console.log('📎 Fichier reçu :', req.file);
-    console.log('📦 req.body :', req.body);
-
+  },
+  async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ message: 'Aucun fichier reçu.' });
     }
-  
-    const relativePath = `/uploads/profiles/${req.file.filename}`;
-  
+
+    // Convertir le buffer en chaîne base64 avec le bon préfixe MIME
+    const base64Image = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+
     try {
       const connection = await pool.getConnection();
       await connection.query(
         'UPDATE user SET profile_picture = ? WHERE id = ?',
-        [relativePath, req.user.userId]
+        [base64Image, req.user.userId]
       );
       connection.release();
-  
-      res.json({ message: 'Photo mise à jour', profile_picture: relativePath });
+
+      res.json({ message: 'Photo mise à jour', profile_picture: base64Image });
     } catch (error) {
       console.error('❌ Erreur DB :', error);
       res.status(500).json({ message: 'Erreur serveur' });
     }
-  });
-  
+  }
+);
 
 module.exports = router;
