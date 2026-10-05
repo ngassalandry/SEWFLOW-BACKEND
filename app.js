@@ -14,7 +14,7 @@ const dashboardRoutes = require('./routes/dashboardRoutes');
 const userRoutes = require('./routes/userRoutes')
 const customerRoutes = require('./routes/customerRoutes');
 const productRoutes = require('./routes/productRoutes')
-const orderRoutes = require('./routes/orderRoutes');
+const ordersRoutes = require('./routes/orderRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 
 
@@ -30,7 +30,7 @@ app.use('/api/user', userRoutes);
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/api/customers', customerRoutes);
 app.use('/api/products', productRoutes)
-app.use('/api/orders',orderRoutes)
+app.use('/api/orders',ordersRoutes)
 app.use('/api/notifications', notificationRoutes)
 
 
