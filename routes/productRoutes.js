@@ -1,34 +1,15 @@
 const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const pool = require('../config/db');
 const verifyToken = require('../middleware/auth');
+const { productUpload } = require('../config/memoryUpload');
 
 const router = express.Router();
 
-// Dossier d'upload des images produits
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'products');
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+// Helper : convertir le buffer en data URI base64
+function bufferToDataUri(file) {
+  if (!file) return null;
+  return `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
 }
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.jpg';
-    cb(null, `product_${Date.now()}${ext}`);
-  },
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 3 * 1024 * 1024 }, // 3 Mo max
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Seules les images sont autorisées.'));
-  },
-});
 
 // ============================================================
 // GET /api/products — Liste des produits de l'atelier
@@ -93,145 +74,157 @@ router.get('/:id', verifyToken, async (req, res) => {
 // ============================================================
 // POST /api/products — Créer un produit (avec image optionnelle)
 // ============================================================
-router.post('/', verifyToken, (req, res, next) => {
-  upload.single('img')(req, res, (err) => {
-    if (err) return res.status(500).json({ message: err.message });
-    next();
-  });
-}, async (req, res) => {
-  const { ref, descrip, unit_price, cost, delivery_date } = req.body;
-  const userId = req.user.userId;
+router.post(
+  '/',
+  verifyToken,
+  (req, res, next) => {
+    productUpload.single('img')(req, res, (err) => {
+      if (err) {
+        console.error('❌ Erreur upload :', err);
+        return res.status(500).json({ message: err.message });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    const { ref, descrip, unit_price, cost, delivery_date } = req.body;
+    const userId = req.user.userId;
 
-  if (!ref || !ref.trim()) {
-    return res.status(400).json({ message: 'La référence est obligatoire.' });
-  }
-
-  try {
-    const connection = await pool.getConnection();
-
-    // Unicité de la ref dans l'atelier
-    const [dup] = await connection.query(
-      `SELECT p.id FROM product p
-       JOIN user u ON p.id_user = u.id
-       WHERE p.ref = ? AND u.id_workshop = ?`,
-      [ref, req.user.workshopId]
-    );
-    if (dup.length > 0) {
-      connection.release();
-      return res.status(409).json({ message: 'Cette référence existe déjà.' });
+    if (!ref || !ref.trim()) {
+      return res.status(400).json({ message: 'La référence est obligatoire.' });
     }
 
-    const imgPath = req.file ? `/uploads/products/${req.file.filename}` : null;
+    try {
+      const connection = await pool.getConnection();
 
-    const [result] = await connection.query(
-      `INSERT INTO product (ref, descrip, unit_price, cost, img, delivery_date, id_user)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        ref,
-        descrip || null,
-        unit_price ? parseFloat(unit_price) : null,
-        cost ? parseFloat(cost) : null,
-        imgPath,
-        delivery_date || null,
-        userId,
-      ]
-    );
+      const [dup] = await connection.query(
+        `SELECT p.id FROM product p
+         JOIN user u ON p.id_user = u.id
+         WHERE p.ref = ? AND u.id_workshop = ?`,
+        [ref, req.user.workshopId]
+      );
+      if (dup.length > 0) {
+        connection.release();
+        return res.status(409).json({ message: 'Cette référence existe déjà.' });
+      }
 
-    const [created] = await connection.query(
-      'SELECT * FROM product WHERE id = ?',
-      [result.insertId]
-    );
+      // Conversion du buffer en base64
+      const imgDataUri = bufferToDataUri(req.file);
 
-    connection.release();
-    res.status(201).json({ message: 'Produit créé.', product: created[0] });
-  } catch (error) {
-    console.error('❌ POST /products :', error);
-    res.status(500).json({ message: 'Erreur serveur' });
+      const [result] = await connection.query(
+        `INSERT INTO product (ref, descrip, unit_price, cost, img, delivery_date, id_user)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          ref,
+          descrip || null,
+          unit_price ? parseFloat(unit_price) : null,
+          cost ? parseFloat(cost) : null,
+          imgDataUri,
+          delivery_date || null,
+          userId,
+        ]
+      );
+
+      // Ne pas renvoyer le base64 dans la réponse de création (allège la charge)
+      const [created] = await connection.query(
+        `SELECT id, ref, descrip, unit_price, cost, delivery_date
+         FROM product WHERE id = ?`,
+        [result.insertId]
+      );
+
+      connection.release();
+      res.status(201).json({ message: 'Produit créé.', product: created[0] });
+    } catch (error) {
+      console.error('❌ POST /products :', error);
+      res.status(500).json({ message: 'Erreur serveur' });
+    }
   }
-});
+);
 
 // ============================================================
 // PUT /api/products/:id — Modifier un produit
 // ============================================================
-router.put('/:id', verifyToken, (req, res, next) => {
-  upload.single('img')(req, res, (err) => {
-    if (err) return res.status(500).json({ message: err.message });
-    next();
-  });
-}, async (req, res) => {
-  const productId = req.params.id;
-  const { ref, descrip, unit_price, cost, delivery_date } = req.body;
-  const workshopId = req.user.workshopId;
-
-  if (!ref || !ref.trim()) {
-    return res.status(400).json({ message: 'La référence est obligatoire.' });
-  }
-
-  try {
-    const connection = await pool.getConnection();
-
-    // Vérifier appartenance à l'atelier
-    const [check] = await connection.query(
-      `SELECT p.id, p.img FROM product p
-       JOIN user u ON p.id_user = u.id
-       WHERE p.id = ? AND u.id_workshop = ?`,
-      [productId, workshopId]
-    );
-    if (check.length === 0) {
-      connection.release();
-      return res.status(404).json({ message: 'Produit introuvable.' });
-    }
-
-    // Unicité de la ref
-    const [dup] = await connection.query(
-      `SELECT p.id FROM product p
-       JOIN user u ON p.id_user = u.id
-       WHERE p.ref = ? AND u.id_workshop = ? AND p.id != ?`,
-      [ref, workshopId, productId]
-    );
-    if (dup.length > 0) {
-      connection.release();
-      return res.status(409).json({ message: 'Cette référence existe déjà.' });
-    }
-
-    // Nouvelle image ou ancienne
-    let imgPath = check[0].img;
-    if (req.file) {
-      // Supprimer l'ancienne image du disque
-      if (imgPath) {
-        const oldFile = path.join(__dirname, '..', imgPath);
-        if (fs.existsSync(oldFile)) fs.unlinkSync(oldFile);
+router.put(
+  '/:id',
+  verifyToken,
+  (req, res, next) => {
+    productUpload.single('img')(req, res, (err) => {
+      if (err) {
+        console.error('❌ Erreur upload :', err);
+        return res.status(500).json({ message: err.message });
       }
-      imgPath = `/uploads/products/${req.file.filename}`;
+      next();
+    });
+  },
+  async (req, res) => {
+    const productId = req.params.id;
+    const { ref, descrip, unit_price, cost, delivery_date } = req.body;
+    const workshopId = req.user.workshopId;
+
+    if (!ref || !ref.trim()) {
+      return res.status(400).json({ message: 'La référence est obligatoire.' });
     }
 
-    await connection.query(
-      `UPDATE product
-       SET ref = ?, descrip = ?, unit_price = ?, cost = ?, img = ?, delivery_date = ?
-       WHERE id = ?`,
-      [
-        ref,
-        descrip || null,
-        unit_price ? parseFloat(unit_price) : null,
-        cost ? parseFloat(cost) : null,
-        imgPath,
-        delivery_date || null,
-        productId,
-      ]
-    );
+    try {
+      const connection = await pool.getConnection();
 
-    const [updated] = await connection.query(
-      'SELECT * FROM product WHERE id = ?',
-      [productId]
-    );
-    connection.release();
+      const [check] = await connection.query(
+        `SELECT p.id, p.img FROM product p
+         JOIN user u ON p.id_user = u.id
+         WHERE p.id = ? AND u.id_workshop = ?`,
+        [productId, workshopId]
+      );
+      if (check.length === 0) {
+        connection.release();
+        return res.status(404).json({ message: 'Produit introuvable.' });
+      }
 
-    res.json({ message: 'Produit mis à jour.', product: updated[0] });
-  } catch (error) {
-    console.error('❌ PUT /products/:id :', error);
-    res.status(500).json({ message: 'Erreur serveur' });
+      const [dup] = await connection.query(
+        `SELECT p.id FROM product p
+         JOIN user u ON p.id_user = u.id
+         WHERE p.ref = ? AND u.id_workshop = ? AND p.id != ?`,
+        [ref, workshopId, productId]
+      );
+      if (dup.length > 0) {
+        connection.release();
+        return res.status(409).json({ message: 'Cette référence existe déjà.' });
+      }
+
+      // Nouvelle image ? Sinon on conserve l'ancienne (déjà en base64)
+      let imgDataUri = check[0].img;
+      if (req.file) {
+        imgDataUri = bufferToDataUri(req.file);
+      }
+
+      await connection.query(
+        `UPDATE product
+         SET ref = ?, descrip = ?, unit_price = ?, cost = ?, img = ?, delivery_date = ?
+         WHERE id = ?`,
+        [
+          ref,
+          descrip || null,
+          unit_price ? parseFloat(unit_price) : null,
+          cost ? parseFloat(cost) : null,
+          imgDataUri,
+          delivery_date || null,
+          productId,
+        ]
+      );
+
+      const [updated] = await connection.query(
+        `SELECT id, ref, descrip, unit_price, cost, delivery_date
+         FROM product WHERE id = ?`,
+        [productId]
+      );
+      connection.release();
+
+      res.json({ message: 'Produit mis à jour.', product: updated[0] });
+    } catch (error) {
+      console.error('❌ PUT /products/:id :', error);
+      res.status(500).json({ message: 'Erreur serveur' });
+    }
   }
-});
+);
 
 // ============================================================
 // DELETE /api/products/:id — Supprimer un produit
@@ -244,7 +237,7 @@ router.delete('/:id', verifyToken, async (req, res) => {
     const connection = await pool.getConnection();
 
     const [check] = await connection.query(
-      `SELECT p.id, p.img FROM product p
+      `SELECT p.id FROM product p
        JOIN user u ON p.id_user = u.id
        WHERE p.id = ? AND u.id_workshop = ?`,
       [productId, workshopId]
@@ -254,12 +247,7 @@ router.delete('/:id', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Produit introuvable.' });
     }
 
-    // Supprimer l'image du disque
-    if (check[0].img) {
-      const filePath = path.join(__dirname, '..', check[0].img);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    }
-
+    // Pas de fichier à supprimer : l'image est dans la DB, elle disparaît avec la ligne
     await connection.query('DELETE FROM product WHERE id = ?', [productId]);
     connection.release();
 
